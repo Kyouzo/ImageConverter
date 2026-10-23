@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Converted outputs live in the app cache; these subfolders are exposed to
+         the Sharesheet via FileProvider with temporary read permission. -->
+    <cache-path name="shared" path="shared/" />
+    <cache-path name="conversions" path="conversions/" />
+</paths>
