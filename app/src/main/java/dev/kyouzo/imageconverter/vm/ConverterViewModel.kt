@@ -15,6 +15,7 @@ import dev.kyouzo.imageconverter.engine.ImageConverter
 import dev.kyouzo.imageconverter.engine.ImageMetadataReader
 import dev.kyouzo.imageconverter.engine.ImageSaver
 import dev.kyouzo.imageconverter.engine.ImageSharer
+import dev.kyouzo.imageconverter.engine.OriginalDeleter
 import dev.kyouzo.imageconverter.engine.SelectedImage
 import dev.kyouzo.imageconverter.format.ConversionRequest
 import dev.kyouzo.imageconverter.format.ImageFormat
@@ -35,6 +36,10 @@ class ConverterViewModel(app: Application) : AndroidViewModel(app) {
     private val converter = ImageConverter(app, registry)
     private val saver = ImageSaver(app)
     private val sharer = ImageSharer(app)
+    private val deleter = OriginalDeleter(app)
+
+    /** On Android 10, the URI to delete again once the user grants consent. */
+    private var pendingSecondDeleteUri: android.net.Uri? = null
 
     private val _state = MutableStateFlow(
         ConverterUiState(outputOptions = buildOptions())
@@ -163,6 +168,10 @@ class ConverterViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 saver.save(output)
                 _state.update { it.copy(savedMessage = "Saved to Pictures/${ImageSaver.SUBDIR}") }
+                // Per the chosen behaviour, delete the original only after a
+                // successful save (never before — so you can't lose the original
+                // without gaining the converted copy).
+                deleteOriginalAfterSave()
             } catch (e: ConversionException) {
                 _state.update { it.copy(errorMessage = e.message) }
             } catch (e: Exception) {
@@ -170,6 +179,52 @@ class ConverterViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
     }
+
+    private suspend fun deleteOriginalAfterSave() {
+        val s = _state.value
+        val source = s.source ?: return
+        if (s.originalDeleted) return
+        when (val r = deleter.attemptDelete(source.uri, source.displayName, source.sizeBytes)) {
+            is OriginalDeleter.Result.Deleted ->
+                _state.update { it.copy(originalDeleted = true, infoMessage = "Original deleted") }
+            is OriginalDeleter.Result.NeedsConsent -> {
+                pendingSecondDeleteUri = r.secondStepDelete
+                _state.update { it.copy(deleteConsentRequest = r.request) }
+            }
+            is OriginalDeleter.Result.NotPossible ->
+                _state.update { it.copy(infoMessage = "Saved. The original couldn't be deleted automatically — you can remove it from your gallery.") }
+            is OriginalDeleter.Result.Failed ->
+                _state.update { it.copy(infoMessage = "Saved. Couldn't delete the original: ${r.reason}") }
+        }
+    }
+
+    /** Called by the UI after the system delete-consent dialog returns. */
+    fun onDeleteConsentResult(granted: Boolean) {
+        val second = pendingSecondDeleteUri
+        pendingSecondDeleteUri = null
+        _state.update { it.copy(deleteConsentRequest = null) }
+        if (!granted) {
+            _state.update { it.copy(infoMessage = "Original kept") }
+            return
+        }
+        viewModelScope.launch {
+            if (second != null) {
+                val ok = deleter.directDelete(second)
+                _state.update {
+                    it.copy(
+                        originalDeleted = ok,
+                        infoMessage = if (ok) "Original deleted" else "Couldn't delete the original",
+                    )
+                }
+            } else {
+                // Android 11+: the system performed the delete on consent.
+                _state.update { it.copy(originalDeleted = true, infoMessage = "Original deleted") }
+            }
+        }
+    }
+
+    fun consumeDeleteRequest() = _state.update { it.copy(deleteConsentRequest = null) }
+    fun consumeInfo() = _state.update { it.copy(infoMessage = null) }
 
     /** Build the share chooser Intent (the Activity launches it). */
     fun buildShareIntent(): Intent? =

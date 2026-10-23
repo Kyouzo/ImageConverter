@@ -1,5 +1,6 @@
 package dev.kyouzo.imageconverter.vm
 
+import androidx.activity.result.IntentSenderRequest
 import androidx.compose.ui.graphics.ImageBitmap
 import dev.kyouzo.imageconverter.engine.ConversionOutput
 import dev.kyouzo.imageconverter.engine.SelectedImage
@@ -36,6 +37,10 @@ data class ConverterUiState(
     val result: ConversionOutput? = null,
     val resultPreview: ImageBitmap? = null,
     val savedMessage: String? = null,
+
+    // Deleting the original after a successful save.
+    val deleteConsentRequest: IntentSenderRequest? = null,
+    val originalDeleted: Boolean = false,
 
     val errorMessage: String? = null,
     val infoMessage: String? = null,

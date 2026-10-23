@@ -85,6 +85,13 @@ marked `✕`; tapping one explains why instead of producing a broken file.
   28+; a manual EXIF rotation path covers API 24–27).
 - The output extension always matches the chosen format; the image is never
   silently re-labelled.
+- **Deleting the original**: after the converted copy is **successfully saved**
+  to the gallery, the app deletes the original photo. On Android 11+ the system
+  shows its own confirmation dialog (required — no broad storage permission is
+  used; see `engine/OriginalDeleter.kt`). The original is never deleted before
+  the save succeeds, and if the specific image can't be located/removed the app
+  says so rather than failing. Decline the system prompt and the original is
+  kept.
 
 ---
 

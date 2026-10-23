@@ -82,6 +82,11 @@ fun ConverterScreen(vm: ConverterViewModel = viewModel()) {
         ActivityResultContracts.RequestPermission()
     ) { granted -> if (granted) vm.save() }
 
+    // System consent dialog for deleting the original after a successful save.
+    val deleteLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result -> vm.onDeleteConsentResult(result.resultCode == android.app.Activity.RESULT_OK) }
+
     fun launchPicker() = pickLauncher.launch(ImagePickerManager.imageOnlyRequest())
 
     fun onSaveClicked() {
@@ -101,6 +106,16 @@ fun ConverterScreen(vm: ConverterViewModel = viewModel()) {
     }
     LaunchedEffect(state.savedMessage) {
         state.savedMessage?.let { scope.launch { snackbar.showSnackbar(it) }; vm.consumeSavedMessage() }
+    }
+    LaunchedEffect(state.infoMessage) {
+        state.infoMessage?.let { scope.launch { snackbar.showSnackbar(it) }; vm.consumeInfo() }
+    }
+    // Launch the system delete-consent dialog when requested.
+    LaunchedEffect(state.deleteConsentRequest) {
+        state.deleteConsentRequest?.let { req ->
+            deleteLauncher.launch(req)
+            vm.consumeDeleteRequest()
+        }
     }
 
     Scaffold(
@@ -423,8 +438,15 @@ private fun ResultCard(
             MetaRowOn("Dimensions", formatDimensions(result.width, result.height))
             MetaRowOn("Size", formatFileSize(result.sizeBytes))
 
+            Text(
+                if (state.originalDeleted) "Original photo deleted."
+                else "Saving will delete the original photo (you'll be asked to confirm).",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+            )
+
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Button(onClick = onSave, modifier = Modifier.weight(1f)) { Text("Save") }
+                Button(onClick = onSave, enabled = !state.originalDeleted, modifier = Modifier.weight(1f)) { Text("Save") }
                 FilledTonalButton(onClick = onShare, modifier = Modifier.weight(1f)) { Text("Share") }
             }
             OutlinedButton(onClick = onConvertAnother, modifier = Modifier.fillMaxWidth()) {
