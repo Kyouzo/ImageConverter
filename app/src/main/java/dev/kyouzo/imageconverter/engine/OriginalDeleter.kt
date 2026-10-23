@@ -1,127 +1,122 @@
 package dev.kyouzo.imageconverter.engine
 
-import android.app.RecoverableSecurityException
-import android.content.ContentUris
 import android.content.Context
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.provider.MediaStore
-import androidx.activity.result.IntentSenderRequest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
 
 /**
- * Deletes the originally-selected image after a successful save.
+ * Deletes the originally-selected image by resolving its real filesystem path
+ * and calling [File.delete].
  *
- * Deletion of media the app does not own requires the user's consent. On
- * Android 11+ (R) we use [MediaStore.createDeleteRequest], which shows a system
- * dialog and performs the delete on approval WITHOUT any broad storage
- * permission — matching the privacy-preserving Photo Picker selection flow. On
- * Android 10 (Q) a delete attempt raises [RecoverableSecurityException] whose
- * consent intent we surface. On API <= 28 the legacy WRITE_EXTERNAL_STORAGE
- * permission (declared maxSdk=28) allows a direct delete.
+ * This requires broad file access:
+ *   - Android 11+ (R): "All files access" (MANAGE_EXTERNAL_STORAGE), which the
+ *     user toggles in Settings. The UI ([ConverterViewModel]) gates on it before
+ *     calling here.
+ *   - Android 10 (Q): legacy external storage (requestLegacyExternalStorage) + WRITE.
+ *   - API <= 28: WRITE_EXTERNAL_STORAGE.
  *
- * Nothing is ever deleted silently on Android 11+, and if the specific image
- * cannot be located/queued the caller reports it instead of failing.
+ * Path resolution tries MediaStore's DATA column first (via the picker URI's row
+ * id, then by display name), then falls back to a filesystem search by name+size
+ * so it can also remove files that are not indexed in MediaStore.
+ *
+ * On failure a [Result.CannotDelete] carries a diagnostic string.
  */
 class OriginalDeleter(private val context: Context) {
 
     sealed interface Result {
-        /** Deletion already completed (API <= 28 direct delete). */
         data object Deleted : Result
-
-        /**
-         * The UI must launch [request]. If [secondStepDelete] is non-null (Android 10),
-         * the caller must delete that URI again after consent is granted; on Android 11+
-         * the system performs the delete itself and this is null.
-         */
-        data class NeedsConsent(val request: IntentSenderRequest, val secondStepDelete: Uri?) : Result
-
-        /** The image could not be identified/queued for deletion (not fatal). */
-        data object NotPossible : Result
-
-        data class Failed(val reason: String) : Result
+        data class CannotDelete(val reason: String) : Result
     }
 
     suspend fun attemptDelete(picked: Uri, displayName: String?, sizeBytes: Long): Result =
         withContext(Dispatchers.IO) {
-            when {
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.R -> {
-                    val uri = resolveDeletableUri(displayName, sizeBytes) ?: picked
-                    try {
-                        val pi = MediaStore.createDeleteRequest(context.contentResolver, listOf(uri))
-                        Result.NeedsConsent(IntentSenderRequest.Builder(pi.intentSender).build(), null)
-                    } catch (_: Exception) {
-                        Result.NotPossible
-                    }
-                }
+            val diag = StringBuilder()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                diag.append("mgr=").append(Environment.isExternalStorageManager())
+            }
 
-                Build.VERSION.SDK_INT == Build.VERSION_CODES.Q -> {
-                    val uri = resolveDeletableUri(displayName, sizeBytes) ?: return@withContext Result.NotPossible
-                    try {
-                        val deleted = context.contentResolver.delete(uri, null, null)
-                        if (deleted > 0) Result.Deleted else Result.NotPossible
-                    } catch (e: RecoverableSecurityException) {
-                        val sender = e.userAction.actionIntent.intentSender
-                        Result.NeedsConsent(IntentSenderRequest.Builder(sender).build(), uri)
-                    } catch (e: Exception) {
-                        Result.Failed(e.message ?: "The original could not be deleted")
-                    }
-                }
+            val path = resolvePath(picked, displayName, sizeBytes, diag)
+                ?: return@withContext Result.CannotDelete("$diag no-path")
 
-                else -> { // API 24..28, legacy WRITE_EXTERNAL_STORAGE
-                    val uri = resolveDeletableUri(displayName, sizeBytes) ?: picked
-                    try {
-                        if (context.contentResolver.delete(uri, null, null) > 0) Result.Deleted
-                        else Result.NotPossible
-                    } catch (e: Exception) {
-                        Result.Failed(e.message ?: "The original could not be deleted")
-                    }
+            val f = File(path)
+            try {
+                when {
+                    !f.exists() -> Result.CannotDelete("$diag missing:$path")
+                    f.delete() -> { rescan(path); Result.Deleted }
+                    else -> Result.CannotDelete("$diag delete-false:$path")
                 }
+            } catch (e: Exception) {
+                Result.CannotDelete("$diag ${e.javaClass.simpleName}")
             }
         }
 
-    /** Deletes [uri] directly (used as the second step after consent on Android 10). */
-    suspend fun directDelete(uri: Uri): Boolean = withContext(Dispatchers.IO) {
+    private fun resolvePath(picked: Uri, name: String?, size: Long, diag: StringBuilder): String? {
+        val vol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) MediaStore.VOLUME_EXTERNAL_PRIMARY else "external"
+        val images = MediaStore.Images.Media.getContentUri(vol)
+        val files = MediaStore.Files.getContentUri(vol)
+
+        // 1) Picker URIs usually end in the MediaStore row id -> query DATA by _ID.
+        picked.lastPathSegment?.toLongOrNull()?.let { id ->
+            dataFor(images, "${MediaStore.MediaColumns._ID}=?", arrayOf(id.toString()), diag, "idData")
+                ?.let { return it }
+        }
+
+        // 2) By display name in Images, then Files.
+        if (!name.isNullOrBlank()) {
+            dataFor(images, "${MediaStore.MediaColumns.DISPLAY_NAME}=?", arrayOf(name), diag, "imgData")?.let { return it }
+            dataFor(files, "${MediaStore.MediaColumns.DISPLAY_NAME}=?", arrayOf(name), diag, "fileData")?.let { return it }
+        }
+
+        // 3) Filesystem search by name + size (requires a known size to stay safe).
+        if (!name.isNullOrBlank() && size > 0) {
+            searchFileSystem(name, size, diag)?.let { return it }
+        }
+
+        return null
+    }
+
+    private fun dataFor(collection: Uri, selection: String, args: Array<String>, diag: StringBuilder, tag: String): String? =
         try {
-            context.contentResolver.delete(uri, null, null) > 0
-        } catch (_: Exception) {
-            false
+            @Suppress("DEPRECATION")
+            context.contentResolver.query(collection, arrayOf(MediaStore.MediaColumns.DATA), selection, args, null)
+                ?.use { c ->
+                    if (c.moveToFirst()) {
+                        val i = c.getColumnIndex(MediaStore.MediaColumns.DATA)
+                        if (i >= 0 && !c.isNull(i)) c.getString(i)
+                        else { diag.append(" $tag=null"); null }
+                    } else { diag.append(" $tag=0"); null }
+                }
+        } catch (e: Exception) {
+            diag.append(" $tag=${e.javaClass.simpleName}")
+            null
+        }
+
+    private fun searchFileSystem(name: String, size: Long, diag: StringBuilder): String? {
+        val root = Environment.getExternalStorageDirectory() ?: return null
+        return try {
+            var scanned = 0
+            val match = root.walkTopDown()
+                .onEnter { it.name != "Android" } // skip app-private trees
+                .firstOrNull { file ->
+                    scanned++
+                    file.isFile && file.name == name && file.length() == size
+                }
+            diag.append(" fs=").append(if (match != null) "hit" else "miss/$scanned")
+            match?.absolutePath
+        } catch (e: Exception) {
+            diag.append(" fs=${e.javaClass.simpleName}")
+            null
         }
     }
 
-    /**
-     * Find the shared-store image URI for the picked item by matching display
-     * name (and size when known). Returns null when there is no single
-     * unambiguous match, so we never queue the wrong photo for deletion.
-     */
-    private fun resolveDeletableUri(displayName: String?, sizeBytes: Long): Uri? {
-        if (displayName.isNullOrBlank()) return null
-        val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-        } else {
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-        }
-        val useSize = sizeBytes > 0
-        val selection = if (useSize) {
-            "${MediaStore.Images.Media.DISPLAY_NAME}=? AND ${MediaStore.Images.Media.SIZE}=?"
-        } else {
-            "${MediaStore.Images.Media.DISPLAY_NAME}=?"
-        }
-        val args = if (useSize) arrayOf(displayName, sizeBytes.toString()) else arrayOf(displayName)
-        return try {
-            context.contentResolver.query(
-                collection,
-                arrayOf(MediaStore.Images.Media._ID),
-                selection, args, null,
-            )?.use { c ->
-                if (c.count != 1) return null
-                c.moveToFirst()
-                val id = c.getLong(c.getColumnIndexOrThrow(MediaStore.Images.Media._ID))
-                ContentUris.withAppendedId(collection, id)
-            }
-        } catch (_: Exception) {
-            null
-        }
+    /** Tell MediaStore the file is gone so its gallery entry disappears. */
+    private fun rescan(path: String) {
+        try { MediaScannerConnection.scanFile(context, arrayOf(path), null, null) } catch (_: Exception) {}
     }
 }

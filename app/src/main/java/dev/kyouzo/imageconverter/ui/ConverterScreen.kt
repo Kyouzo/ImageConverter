@@ -82,10 +82,38 @@ fun ConverterScreen(vm: ConverterViewModel = viewModel()) {
         ActivityResultContracts.RequestPermission()
     ) { granted -> if (granted) vm.save() }
 
-    // System consent dialog for deleting the original after a successful save.
-    val deleteLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartIntentSenderForResult()
-    ) { result -> vm.onDeleteConsentResult(result.resultCode == android.app.Activity.RESULT_OK) }
+    // "All files access" settings screen (Android 11+) for deleting the original.
+    val manageAllFilesLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { _ ->
+        if (!vm.needsAllFilesAccess()) vm.performOriginalDeletion() else vm.onDeletePermissionDenied()
+    }
+
+    // WRITE permission for deleting on API <= 29.
+    val deleteWritePermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted -> if (granted) vm.performOriginalDeletion() else vm.onDeletePermissionDenied() }
+
+    fun startDeletionFlow() {
+        when {
+            vm.needsAllFilesAccess() -> manageAllFilesLauncher.launch(
+                android.content.Intent(
+                    android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                    android.net.Uri.parse("package:${context.packageName}"),
+                )
+            )
+            else -> {
+                val wp = vm.writePermissionForDelete()
+                if (wp != null && ContextCompat.checkSelfPermission(context, wp) !=
+                    android.content.pm.PackageManager.PERMISSION_GRANTED
+                ) {
+                    deleteWritePermLauncher.launch(wp)
+                } else {
+                    vm.performOriginalDeletion()
+                }
+            }
+        }
+    }
 
     fun launchPicker() = pickLauncher.launch(ImagePickerManager.imageOnlyRequest())
 
@@ -110,11 +138,12 @@ fun ConverterScreen(vm: ConverterViewModel = viewModel()) {
     LaunchedEffect(state.infoMessage) {
         state.infoMessage?.let { scope.launch { snackbar.showSnackbar(it) }; vm.consumeInfo() }
     }
-    // Launch the system delete-consent dialog when requested.
-    LaunchedEffect(state.deleteConsentRequest) {
-        state.deleteConsentRequest?.let { req ->
-            deleteLauncher.launch(req)
-            vm.consumeDeleteRequest()
+    // After a successful save, ensure file-delete access (All files access on R+,
+    // or WRITE on older), then delete the original.
+    LaunchedEffect(state.requestDeletionAfterSave) {
+        if (state.requestDeletionAfterSave) {
+            vm.consumeDeletionTrigger()
+            startDeletionFlow()
         }
     }
 
@@ -439,8 +468,8 @@ private fun ResultCard(
             MetaRowOn("Size", formatFileSize(result.sizeBytes))
 
             Text(
-                if (state.originalDeleted) "Original photo deleted."
-                else "Saving will delete the original photo (you'll be asked to confirm).",
+                state.deleteStatus
+                    ?: "Saving will delete the original photo from your device.",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onPrimaryContainer,
             )

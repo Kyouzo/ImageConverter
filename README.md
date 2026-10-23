@@ -86,12 +86,15 @@ marked `✕`; tapping one explains why instead of producing a broken file.
 - The output extension always matches the chosen format; the image is never
   silently re-labelled.
 - **Deleting the original**: after the converted copy is **successfully saved**
-  to the gallery, the app deletes the original photo. On Android 11+ the system
-  shows its own confirmation dialog (required — no broad storage permission is
-  used; see `engine/OriginalDeleter.kt`). The original is never deleted before
-  the save succeeds, and if the specific image can't be located/removed the app
-  says so rather than failing. Decline the system prompt and the original is
-  kept.
+  to the gallery, the app deletes the original photo. Because the Photo Picker
+  only grants read access to the one picked image, deleting it requires the
+  photo-access permission (`READ_MEDIA_IMAGES` on Android 13+, `READ_EXTERNAL_STORAGE`
+  on 10–12) so the app can locate it in MediaStore; this is requested at delete
+  time, not at selection. On Android 11+ the system then shows its own delete
+  confirmation dialog. The original is never deleted before the save succeeds;
+  decline the permission or the confirmation and the original is kept; if the
+  image can't be located the app says so rather than failing. See
+  `engine/OriginalDeleter.kt`.
 
 ---
 
@@ -144,6 +147,8 @@ ui/                      Compose screen, components, Material 3 theme
 - API 29+: scoped storage, **no permission**.
 - API 24–28: `WRITE_EXTERNAL_STORAGE` (declared `maxSdkVersion="28"`), requested
   at runtime only when saving.
+- Deleting the original additionally needs photo access (`READ_MEDIA_IMAGES` on
+  33+, `READ_EXTERNAL_STORAGE` on 29–32), requested at delete time.
 - Sharing uses a `FileProvider` (`${applicationId}.fileprovider`) with temporary
   read permission; originals are never overwritten (unique names are generated).
 

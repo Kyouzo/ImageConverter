@@ -10,9 +10,24 @@
       public Pictures collection via MediaStore still requires it. On API 29+ the
       app saves with scoped storage and no permission at all.
     -->
+    <!--
+      Deleting the original after a save removes the real file from disk.
+        - MANAGE_EXTERNAL_STORAGE ("All files access", Android 11+): granted via a
+          Settings screen; lets the app resolve the file path and File.delete() it.
+        - WRITE_EXTERNAL_STORAGE (<= API 29): with requestLegacyExternalStorage,
+          allows the same file delete on Android 10 and below.
+        - READ_MEDIA_IMAGES / READ_EXTERNAL_STORAGE: used to resolve the file path
+          from MediaStore. None of these are needed to SELECT an image (the Photo
+          Picker needs no permission); they are only for deletion.
+    -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
-        android:maxSdkVersion="28" />
+        android:maxSdkVersion="29" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
 
     <application
         android:allowBackup="true"
@@ -20,6 +35,7 @@
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
+        android:requestLegacyExternalStorage="true"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.ImageConverter">
